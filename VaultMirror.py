@@ -11,13 +11,12 @@ from typing import List
 import win32com.client
 
 # --- Global Paths ---
-# Storing in AppData ensures the app works even if the EXE is moved
 BASE_DIR = Path(os.environ.get('APPDATA')) / 'VaultMirror'
 SCRIPTS_DIR = BASE_DIR / 'scripts'
 STATES_DIR = BASE_DIR / 'sync-states'
+LOCKS_DIR = BASE_DIR / 'locks'
 
-# Ensure directories exist
-for p in [BASE_DIR, SCRIPTS_DIR, STATES_DIR]:
+for p in [BASE_DIR, SCRIPTS_DIR, STATES_DIR, LOCKS_DIR]:
     p.mkdir(parents=True, exist_ok=True)
 
 # --- Helpers ---
@@ -37,22 +36,14 @@ def select_folder(title="Select Folder"):
     return folder_selected
 
 def run_standalone_sync(script_path):
-    """Executes the sync logic using the bundled interpreter"""
     p = Path(script_path)
-    if not p.exists():
-        print(f"Error: Script path {script_path} not found.")
-        return
+    if not p.exists(): return
     
     with open(p, 'r', encoding='utf-8') as f:
         code = f.read()
     
-    # Execute with necessary imports available in the context
     exec_globals = {
-        'os': os,
-        'json': json,
-        'shutil': shutil,
-        'Path': Path,
-        '__name__': '__main__'
+        'os': os, 'json': json, 'shutil': shutil, 'Path': Path, '__name__': '__main__'
     }
     exec(code, exec_globals)
 
@@ -83,7 +74,9 @@ class DriveSyncScheduler:
 
     def _create_sync_script(self, case_name, source_path, dest_path, bidirectional, state_file):
         script_path = SCRIPTS_DIR / f"sync_{case_name}.py"
+        lock_file = LOCKS_DIR / f"{case_name}.lock"
         
+        # Updated Logic: Includes a 'Locking' check to prevent multiple instances
         sync_logic = f'''
 import os
 import json
@@ -101,44 +94,60 @@ def get_tree_state(path):
     return state
 
 def sync():
-    dir_a, dir_b = Path(r"{source_path}"), Path(r"{dest_path}")
-    state_path = Path(r"{state_file}")
+    lock_path = Path(r"{lock_file}")
     
-    last_state = {{}}
-    if state_path.exists():
-        try:
-            with open(state_path, "r") as f: last_state = json.load(f)
-        except: pass
+    # 1. Check for existing lock
+    if lock_path.exists():
+        print("Sync already in progress for this task. Skipping.")
+        return
 
-    curr_a, curr_b = get_tree_state(dir_a), get_tree_state(dir_b)
-    all_paths = set(curr_a.keys()) | set(curr_b.keys()) | set(last_state.keys())
-    new_state = {{}}
+    # 2. Create lock
+    lock_path.touch()
 
-    for rel in all_paths:
-        p_a, p_b = dir_a / rel, dir_b / rel
-        in_a, in_b, in_l = rel in curr_a, rel in curr_b, rel in last_state
+    try:
+        dir_a, dir_b = Path(r"{source_path}"), Path(r"{dest_path}")
+        state_path = Path(r"{state_file}")
+        
+        last_state = {{}}
+        if state_path.exists():
+            try:
+                with open(state_path, "r") as f: last_state = json.load(f)
+            except: pass
 
-        if {bidirectional}:
-            if in_l and not in_a and in_b:
-                if p_b.exists(): os.remove(p_b)
-                continue
-            if in_l and not in_b and in_a:
-                if p_a.exists(): os.remove(p_a)
-                continue
+        curr_a, curr_b = get_tree_state(dir_a), get_tree_state(dir_b)
+        all_paths = set(curr_a.keys()) | set(curr_b.keys()) | set(last_state.keys())
+        new_state = {{}}
 
-        if in_a and (not in_b or curr_a[rel] > curr_b.get(rel, 0)):
-            p_b.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(p_a, p_b)
-            new_state[rel] = p_a.stat().st_mtime
-        elif {bidirectional} and in_b and (not in_a or curr_b[rel] > curr_a.get(rel, 0)):
-            p_a.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(p_b, p_a)
-            new_state[rel] = p_b.stat().st_mtime
-        elif in_a:
-            new_state[rel] = curr_a[rel]
+        for rel in all_paths:
+            p_a, p_b = dir_a / rel, dir_b / rel
+            in_a, in_b, in_l = rel in curr_a, rel in curr_b, rel in last_state
 
-    with open(state_path, "w") as f:
-        json.dump(new_state, f, indent=2)
+            if {bidirectional}:
+                if in_l and not in_a and in_b:
+                    if p_b.exists(): os.remove(p_b)
+                    continue
+                if in_l and not in_b and in_a:
+                    if p_a.exists(): os.remove(p_a)
+                    continue
+
+            if in_a and (not in_b or curr_a[rel] > curr_b.get(rel, 0)):
+                p_b.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p_a, p_b)
+                new_state[rel] = p_a.stat().st_mtime
+            elif {bidirectional} and in_b and (not in_a or curr_b[rel] > curr_a.get(rel, 0)):
+                p_a.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(p_b, p_a)
+                new_state[rel] = p_b.stat().st_mtime
+            elif in_a:
+                new_state[rel] = curr_a[rel]
+
+        with open(state_path, "w") as f:
+            json.dump(new_state, f, indent=2)
+            
+    finally:
+        # 3. Always remove lock on exit
+        if lock_path.exists():
+            lock_path.unlink()
 
 if __name__ == "__main__":
     sync()
@@ -156,7 +165,6 @@ if __name__ == "__main__":
         sch, mod = intervals.get(interval, ('HOURLY', '1'))
         
         exe_path = sys.executable
-        # Building the command to call itself --run-task
         cmd = [
             'schtasks', '/Create', '/TN', task_name,
             '/TR', f'"{exe_path}" --run-task "{sync_script}"',
@@ -166,6 +174,7 @@ if __name__ == "__main__":
         res = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         if res.returncode == 0:
             self.config['sync_jobs'][task_name] = {
+                'case_name': case_name,
                 'source_path': str(source_path), 
                 'dest_path': str(dest_path), 
                 'bidirectional': bidirectional,
@@ -176,25 +185,20 @@ if __name__ == "__main__":
         return False
 
     def delete_sync_task(self, task_name):
-        """Fixed: defensive deletion logic to prevent KeyErrors"""
-        # 1. Unregister from Task Scheduler
         subprocess.run(f'schtasks /Delete /TN "{task_name}" /F', shell=True, capture_output=True)
-        
-        # 2. Cleanup state file
         state_file = STATES_DIR / f"state_{task_name}.json"
-        if state_file.exists():
-            try: state_file.unlink()
-            except: pass
+        if state_file.exists(): state_file.unlink()
         
-        # 3. Cleanup logic script (with KeyCheck)
         details = self.config['sync_jobs'].get(task_name)
-        if details and 'script_path' in details:
-            p = Path(details['script_path'])
-            if p.exists():
-                try: p.unlink()
-                except: pass
+        if details:
+            # Clean up script
+            if 'script_path' in details:
+                p = Path(details['script_path'])
+                if p.exists(): p.unlink()
+            # Clean up potential leftover lock
+            l = LOCKS_DIR / f"{details.get('case_name', '')}.lock"
+            if l.exists(): l.unlink()
 
-        # 4. Remove from config
         if task_name in self.config['sync_jobs']:
             del self.config['sync_jobs'][task_name]
             self.save_config()
