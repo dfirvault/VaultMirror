@@ -38,13 +38,9 @@ def select_folder(title="Select Folder"):
 def run_standalone_sync(script_path):
     p = Path(script_path)
     if not p.exists(): return
-    
     with open(p, 'r', encoding='utf-8') as f:
         code = f.read()
-    
-    exec_globals = {
-        'os': os, 'json': json, 'shutil': shutil, 'Path': Path, '__name__': '__main__'
-    }
+    exec_globals = {'os': os, 'json': json, 'shutil': shutil, 'Path': Path, '__name__': '__main__'}
     exec(code, exec_globals)
 
 class DriveSyncScheduler:
@@ -54,7 +50,6 @@ class DriveSyncScheduler:
             self.scheduler.Connect()
         except Exception as e:
             print(f"COM Connection Error: {e}")
-            
         self.config_file = BASE_DIR / 'sync-config.json'
         self.load_config()
         
@@ -76,12 +71,14 @@ class DriveSyncScheduler:
         script_path = SCRIPTS_DIR / f"sync_{case_name}.py"
         lock_file = LOCKS_DIR / f"{case_name}.lock"
         
-        # Updated Logic: Includes a 'Locking' check to prevent multiple instances
         sync_logic = f'''
 import os
 import json
 import shutil
 from pathlib import Path
+
+# Files to ignore during sync
+EXCLUSIONS = [".tmp"]
 
 def get_tree_state(path):
     p = Path(path)
@@ -89,19 +86,16 @@ def get_tree_state(path):
     if not p.exists(): return state
     for file in p.rglob("*"):
         if file.is_file():
+            # Skip excluded file types
+            if any(file.name.lower().endswith(ext) for ext in EXCLUSIONS):
+                continue
             try: state[str(file.relative_to(p))] = file.stat().st_mtime
             except: pass
     return state
 
 def sync():
     lock_path = Path(r"{lock_file}")
-    
-    # 1. Check for existing lock
-    if lock_path.exists():
-        print("Sync already in progress for this task. Skipping.")
-        return
-
-    # 2. Create lock
+    if lock_path.exists(): return
     lock_path.touch()
 
     try:
@@ -143,11 +137,8 @@ def sync():
 
         with open(state_path, "w") as f:
             json.dump(new_state, f, indent=2)
-            
     finally:
-        # 3. Always remove lock on exit
-        if lock_path.exists():
-            lock_path.unlink()
+        if lock_path.exists(): lock_path.unlink()
 
 if __name__ == "__main__":
     sync()
@@ -161,24 +152,19 @@ if __name__ == "__main__":
         state_file = STATES_DIR / f"state_{task_name}.json"
         sync_script = self._create_sync_script(case_name, source_path, dest_path, bidirectional, state_file)
         
-        intervals = {'1': ('MINUTE', '1'), '2': ('HOURLY', '1'), '3': ('DAILY', '1'), '4': ('WEEKLY', '1')}
-        sch, mod = intervals.get(interval, ('HOURLY', '1'))
+        interval_map = {'1': ('MINUTE', '1', 'Every Minute'), '2': ('HOURLY', '1', 'Hourly'), 
+                        '3': ('DAILY', '1', 'Daily'), '4': ('WEEKLY', '1', 'Weekly')}
+        sch, mod, friendly_name = interval_map.get(interval, ('HOURLY', '1', 'Hourly'))
         
         exe_path = sys.executable
-        cmd = [
-            'schtasks', '/Create', '/TN', task_name,
-            '/TR', f'"{exe_path}" --run-task "{sync_script}"',
-            '/SC', sch, '/MO', mod, '/F'
-        ]
+        cmd = ['schtasks', '/Create', '/TN', task_name, '/TR', f'"{exe_path}" --run-task "{sync_script}"',
+               '/SC', sch, '/MO', mod, '/F']
         
         res = subprocess.run(cmd, capture_output=True, text=True, shell=True)
         if res.returncode == 0:
             self.config['sync_jobs'][task_name] = {
-                'case_name': case_name,
-                'source_path': str(source_path), 
-                'dest_path': str(dest_path), 
-                'bidirectional': bidirectional,
-                'script_path': str(sync_script)
+                'case_name': case_name, 'source_path': str(source_path), 'dest_path': str(dest_path), 
+                'bidirectional': bidirectional, 'interval_desc': friendly_name, 'script_path': str(sync_script)
             }
             self.save_config()
             return True
@@ -188,17 +174,13 @@ if __name__ == "__main__":
         subprocess.run(f'schtasks /Delete /TN "{task_name}" /F', shell=True, capture_output=True)
         state_file = STATES_DIR / f"state_{task_name}.json"
         if state_file.exists(): state_file.unlink()
-        
         details = self.config['sync_jobs'].get(task_name)
         if details:
-            # Clean up script
             if 'script_path' in details:
                 p = Path(details['script_path'])
                 if p.exists(): p.unlink()
-            # Clean up potential leftover lock
             l = LOCKS_DIR / f"{details.get('case_name', '')}.lock"
             if l.exists(): l.unlink()
-
         if task_name in self.config['sync_jobs']:
             del self.config['sync_jobs'][task_name]
             self.save_config()
@@ -216,9 +198,7 @@ def main_menu():
         print("ERROR: Administrative privileges required.")
         input("\nPress Enter to exit...")
         return
-    
     scheduler = DriveSyncScheduler()
-    
     while True:
         clear()
         print("==============================")
@@ -227,8 +207,6 @@ def main_menu():
         print("1. Create New Sync Task")
         print("2. Manage Existing Tasks")
         print("3. Exit")
-        print("------------------------------")
-        
         choice = input("\nChoice: ").strip()
         
         if choice == '1':
@@ -237,7 +215,7 @@ def main_menu():
             if not case: continue
             src, dst = select_folder("Select Source"), select_folder("Select Destination")
             if not src or not dst: continue
-            print("\n1. Min | 2. Hour | 3. Day | 4. Week")
+            print("\n1. Minute | 2. Hour | 3. Day | 4. Week")
             itv = input("Choice: ").strip()
             bi = input("Bi-directional? (y/n): ").lower() == 'y'
             if scheduler.create_sync_task(case, src, dst, itv, bi):
@@ -248,23 +226,30 @@ def main_menu():
             clear()
             tasks = list(scheduler.config['sync_jobs'].keys())
             if not tasks:
-                print("No tasks found."); input("\nPress Enter..."); continue
+                print("No tasks found."); input("Press Enter..."); continue
             for i, t in enumerate(tasks, 1): print(f"{i}. {t}")
             print(f"{len(tasks)+1}. Back")
             idx = input("\nSelect Task: ").strip()
             if idx.isdigit() and 1 <= int(idx) <= len(tasks):
                 name = tasks[int(idx)-1]
+                details = scheduler.config['sync_jobs'][name]
                 clear()
-                print(f"TASK: {name}")
-                print("1. Run Now | 2. Delete | 3. Back")
+                print(f"--- TASK DETAILS: {name} ---")
+                print(f"Source:   {details.get('source_path')}")
+                print(f"Dest:     {details.get('dest_path')}")
+                print(f"Interval: {details.get('interval_desc', 'Unknown')}")
+                print(f"Mode:     {'Bi-Directional' if details.get('bidirectional') else 'One-Way'}")
+                print("-" * 30)
+                print("1. Run Now")
+                print("2. Delete Task")
+                print("3. Back")
                 sub = input("\nAction: ").strip()
                 if sub == '1':
                     scheduler.run_sync_immediately(name)
-                    print("✓ Triggered.")
+                    print("✓ Triggered."); input("Press Enter...")
                 elif sub == '2':
                     scheduler.delete_sync_task(name)
-                    print("✓ Deleted.")
-                input("\nPress Enter to continue...")
+                    print("✓ Deleted."); input("Press Enter...")
         elif choice == '3':
             break
 
