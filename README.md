@@ -2,7 +2,9 @@
 Simple bi-directional or one-way sync tool, suitable for archiving cases across multiple drives. VaultMirror is a robust, lightweight file synchronization tool designed for DFIR (Digital Forensics and Incident Response) professionals. It ensures that your evidence folders, toolsets, or case files stay synchronized across different drives or network shares using Windows Task Scheduler for background automation.
 
 <img width="354" height="250" alt="{E1F1AD8A-244B-4D2D-81C4-8EDA267F313E}" src="https://github.com/user-attachments/assets/8ea520d0-bfe1-4146-a228-e676b80d62ab" />
+
 <img width="354" height="172" alt="{83B6D7D7-777B-4E64-A557-8CFB55E59755}" src="https://github.com/user-attachments/assets/c4a7331e-d16c-4953-8fd2-611dedf46423" />
+
 <img width="360" height="254" alt="{50F0FC6D-0708-436D-AE71-2BDEF2E98D4B}" src="https://github.com/user-attachments/assets/492a6106-c200-4fb2-a4b8-f2b62e85431d" />
 
 
